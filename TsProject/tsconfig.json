@@ -1,0 +1,66 @@
+{
+    //引用的文件
+    "files": [
+        "../Assets/Gen/Typing/csharp/index.d.ts",
+        "../Assets/Puerts/Typing/puerts/index.d.ts"
+    ],
+    //编译目录,支持文件夹丶后缀名识别
+    "include": [
+        "./src/*",
+        "./src/**/*.ts"
+    ],
+    //配置
+    "compilerOptions": {
+        // 目标语言的版本
+        "target": "ES2020",
+        //"target": "ES5",
+        // 生成代码的模板标准
+        "module": "CommonJS",
+        // TS需要引用的库，即声明文件，es5 默认引用dom、es5、scripthost,如需要使用es的高级版本特性，通常都需要配置，如es8的数组新特性需要引入"ES2019.Array",
+        "lib": [
+            "DOM",
+            "ES7",
+            "ScriptHost",
+            "DOM.Iterable",
+        ],
+        //允许编译javascript文件
+        "allowJs": true,
+        //在 .js文件中报告错误。与 --allowJs配合使用。
+        "checkJs": false,
+        //将所有文件输出为一个js文件, 仅支持AMD模板标准
+        //"outFile": "./output/main.js",
+        // 指定输出目录
+        "outDir": "./output",
+        // 只生成声明文件，而不会生成js文件
+        "emitDeclarationOnly": false,
+        //增量编译
+        "incremental": true,
+        // 生成目标文件的sourceMap文件
+        "sourceMap": true,
+        // 声明文件目录，默认时node_modules/@types
+        "typeRoots": [],
+        // 加载的声明文件包
+        "types": [],
+        // 删除注释 
+        "removeComments": true,
+        // 不输出文件,即编译后不会生成任何js文件
+        "noEmit": false,
+        // 发送错误时不输出任何文件
+        "noEmitOnError": false,
+        // 开启所有严格的类型检查
+        "strict": false,
+        // 在代码中注入'use strict'
+        "alwaysStrict": true,
+        // 不允许隐式的any类型
+        "noImplicitAny": false,
+        // 检查只声明、未使用的局部变量(只提示不报错)
+        "noUnusedLocals": false,
+        // 检查未使用的函数参数(只提示不报错)
+        "noUnusedParameters": false,
+        //启用装饰器
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true,
+        //当 this表达式的值为 any类型的时候，生成一个错误。
+        //"noImplicitThis": true,
+    }
+}
