@@ -1,8 +1,8 @@
 import * as CS from "csharp";
-import { $generic, $typeof } from "puerts";
+import { $generic } from "puerts";
 let List = $generic(CS.System.Collections.Generic.List$1, CS.System.Object);
 
-const CLOSE = "close";
+const CLOSE_EVENT = "close";
 
 class JsWorker {
     public get isAlive() { return this.worker.IsAlive; }
@@ -44,7 +44,7 @@ class JsWorker {
         };
         if (this.isMain)
             this.worker.messageByMain = (name, data) => {
-                if (name === CLOSE) {
+                if (name === CLOSE_EVENT) {
                     let o = getValue(data), closing = true;
                     let arr = this.callbacks.get(name);
                     if (arr)
@@ -185,13 +185,13 @@ class JsWorker {
     }
     public start(filepath: string) {
         if (globalWorker && globalWorker["worker"] == this.worker)
-            throw new Error("JsWorker自身无法调用");
+            throw new Error("Thread cannot called start");
 
         this.worker.Startup(filepath);
     }
     public dispose() {
         if (globalWorker && globalWorker["worker"] == this.worker)
-            this.post(CLOSE);
+            this.post(CLOSE_EVENT);
         else {
             this.worker.Dispose();
             this.callbacks.clear();
@@ -208,18 +208,15 @@ class JsWorker {
             this.worker.CallMain(eventName, o);
     }
     public postSync<T>(eventName: string, data?: any): T {
-        if (this.isMain && !this.worker.IsAlive)
-            throw new Error("JsWorker线程未运行, 无法同步调用");
-
-        let o: CS.JsWorker.Package;
+        let o: CS.JsWorker.Package, result = undefined;
         if (data !== undefined && data !== null && data !== void 0) {
             o = this.package(data);
         }
-        let result = undefined;
         if (this.isMain)
             result = this.worker.Sync.CallChild(eventName, o);
         else
             result = this.worker.Sync.CallMain(eventName, o);
+        //Result
         if (result !== undefined && result !== null && result !== void 0) {
             result = this.unpackage(result);
         }
@@ -227,7 +224,7 @@ class JsWorker {
     }
     public eval(chunk: string, chunkName?: string) {
         if (globalWorker && globalWorker["worker"] == this.worker)
-            throw new Error("JsWorker自身无法调用");
+            throw new Error("Thread cannot called eval");
 
         this.worker.Eval(chunk, chunkName);
     }
