@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -402,6 +402,8 @@ public class JsWorker : MonoBehaviour, IDisposable
         //线程安全
         private ReaderWriterLock locker = new ReaderWriterLock();
         private const int lockTimeout = 1000;
+        //同步状态
+        private bool syncing;
         //同步消息
         private string mainEventName = null;
         private Package mainEventData = null;
@@ -411,11 +413,15 @@ public class JsWorker : MonoBehaviour, IDisposable
         public SyncProcess(JsWorker worker)
         {
             this.worker = worker;
+            this.syncing = false;
         }
 
         public object CallMain(string name, Package data)
         {
             if (name == null) return null;
+            //获取同步状态
+            if (!LockSyncing())
+                throw new Exception("无法访问线程, 目标正在等待同步");
             //写入主线程
             locker.AcquireWriterLock(lockTimeout);
             this.mainEventName = name;
@@ -436,11 +442,15 @@ public class JsWorker : MonoBehaviour, IDisposable
             finally
             {
                 locker.ReleaseReaderLock();
+                UnlockSyncing();
             }
         }
         public object CallChild(string name, Package data)
         {
             if (name == null) return null;
+            //获取同步状态
+            if (!LockSyncing())
+                throw new Exception("无法访问线程, 目标正在等待同步");
             //写入子线程
             locker.AcquireWriterLock(lockTimeout);
             this.childEventName = name;
@@ -461,6 +471,7 @@ public class JsWorker : MonoBehaviour, IDisposable
             finally
             {
                 locker.ReleaseReaderLock();
+                UnlockSyncing();
             }
         }
         public void ProcessMain()
@@ -511,6 +522,23 @@ public class JsWorker : MonoBehaviour, IDisposable
                     this.childEventName = null;
                     locker.ReleaseWriterLock();
                 }
+            }
+        }
+
+        private bool LockSyncing()
+        {
+            lock (locker)
+            {
+                if (this.syncing) return false;
+                this.syncing = true;
+                return true;
+            }
+        }
+        private void UnlockSyncing()
+        {
+            lock (locker)
+            {
+                this.syncing = false;
             }
         }
     }
