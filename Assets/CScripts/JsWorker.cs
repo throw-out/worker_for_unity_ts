@@ -12,7 +12,7 @@ public class JsWorker : MonoBehaviour, IDisposable
         var obj = new GameObject("JsWorker");
         DontDestroyOnLoad(obj);
         var ins = obj.AddComponent<JsWorker>();
-        ins.Loader = new _SyncLoader(loader);
+        ins.loader = new SyncLoader(ins, loader);
         if (!string.IsNullOrEmpty(filepath))
             ins.Working(filepath);
 
@@ -36,49 +36,57 @@ public class JsWorker : MonoBehaviour, IDisposable
     //消息接口
     public Func<string, Package, Package> messageByMain { get; set; }
     public Func<string, Package, Package> messageByChild { get; set; }
-    //同步操作
-    public SyncProcess Sync { get; private set; }
-    private _SyncLoader Loader;
-    //线程运行中, 且JsEnv准备完成
+    //线程初始完成, 且运行中
     public bool IsAlive
     {
         get
         {
-            return this.thread != null && this.thread.IsAlive
-                && this.JsEnv != null;
+            return this.thread != null && this.thread.IsAlive && this.JsEnv != null;
         }
     }
-
+    //同步对象
+    private SyncLoader loader;
+    private SyncProcess sync;
+    public SyncProcess Sync
+    {
+        get
+        {
+            if (!this.IsAlive)
+                throw new Exception("Thread not ready ok, can't use it now.");
+            return this.sync;
+        }
+    }
+    //同步状态
+    private bool syncing;
     //线程
     private Thread thread;
     private bool running = false;
-    private bool finish = false;
     //消息集合
-    private Queue<_Event> mainEvents;
-    private Queue<_Event> childEvents;
-    //Require list
+    private Queue<Event> mainEvents;
+    private Queue<Event> childEvents;
+    //Eval require list
     private Queue<(string, string)> eval;
 
     public JsWorker()
     {
-        mainEvents = new Queue<_Event>();
-        childEvents = new Queue<_Event>();
+        mainEvents = new Queue<Event>();
+        childEvents = new Queue<Event>();
         eval = new Queue<(string, string)>();
-        Sync = new SyncProcess(this);
+        sync = new SyncProcess(this);
     }
     void Start()
     {
-        if (Loader == null)
+        if (loader == null)
         {
             this.enabled = false;
-            throw new Exception("Loader is null");
+            throw new Exception("instance cannot working, loader is null");
         }
     }
     void Update()
     {
         ProcessMain();
-        Sync.ProcessMain();
-        Loader.ProcessMain();
+        sync.ProcessMain();
+        loader.ProcessMain();
     }
     void OnDestroy()
     {
@@ -87,14 +95,13 @@ public class JsWorker : MonoBehaviour, IDisposable
     void Working(string filepath)
     {
         if (this.JsEnv != null || this.thread != null || this.running)
-            throw new Exception("JsWorker已经在运行中, 无法重复启动");
-        if (this.Loader == null)
-            throw new Exception("JsWorker.Loader为空, 它无法正常运行");
-        if (this.finish)
-            throw new Exception("JsWorker已被释放(关闭), 无法重新启动");
+            throw new Exception("Thread is running, cannot start repeatedly!");
+        if (this.loader == null)
+            throw new Exception("Thread cannot start working, loader is null!");
         if (!this.enabled)
-            throw new Exception("JsWorker主线程被禁用, 它无法正常运行");
+            throw new Exception("Thread cannot start working, main thread is disable");
 
+        syncing = false;
         running = true;
         thread = new Thread(new ThreadStart(() =>
         {
@@ -104,7 +111,7 @@ public class JsWorker : MonoBehaviour, IDisposable
                 // JsEnv脚本放在Resource目录下,故ILoader仅允许在主线程调用
                 // 子线程_SyncLoader接口会阻塞线程, 直到主线程调用ILoader后才会继续执行
                 // JsEnv初始化时将调用_SyncLoader接口
-                jsEnv = JsEnv = new JsEnv(Loader);
+                jsEnv = JsEnv = new JsEnv(loader);
                 jsEnv.UsingAction<string, string>();
                 jsEnv.UsingAction<string, Package>();
                 jsEnv.UsingFunc<string, Package, object>();
@@ -120,7 +127,7 @@ public class JsWorker : MonoBehaviour, IDisposable
                     jsEnv.Tick();
                     ProcessChild();
                     ProcessChildEval(jsEnv);
-                    Sync.ProcessChild();
+                    sync.ProcessChild();
                 }
             }
             catch (Exception e)
@@ -145,8 +152,6 @@ public class JsWorker : MonoBehaviour, IDisposable
         messageByMain = null;
         messageByChild = null;
         running = false;
-        finish = true;
-
         //此处仅通知线程中断, 由线程自行结束(使用Abort阻塞将导致puerts crash)
         if (thread != null) thread.Interrupt();
         //if (JsEnv != null) JsEnv.Dispose();
@@ -157,7 +162,7 @@ public class JsWorker : MonoBehaviour, IDisposable
     {
         lock (mainEvents)
         {
-            mainEvents.Enqueue(new _Event()
+            mainEvents.Enqueue(new Event()
             {
                 name = name,
                 data = data
@@ -168,7 +173,7 @@ public class JsWorker : MonoBehaviour, IDisposable
     {
         lock (childEvents)
         {
-            childEvents.Enqueue(new _Event()
+            childEvents.Enqueue(new Event()
             {
                 name = name,
                 data = data
@@ -188,7 +193,7 @@ public class JsWorker : MonoBehaviour, IDisposable
     {
         if (mainEvents.Count > 0)
         {
-            List<_Event> events = new List<_Event>();
+            List<Event> events = new List<Event>();
             lock (mainEvents)
             {
                 int count = PROCESS_COUNT;
@@ -216,7 +221,7 @@ public class JsWorker : MonoBehaviour, IDisposable
     {
         if (childEvents.Count > 0)
         {
-            List<_Event> events = new List<_Event>();
+            List<Event> events = new List<Event>();
             lock (childEvents)
             {
                 int count = PROCESS_COUNT;
@@ -265,9 +270,37 @@ public class JsWorker : MonoBehaviour, IDisposable
             }
         }
     }
-
-    private class _SyncLoader : ILoader
+    /// <summary>
+    /// 获取同步锁定, 返回是否成功
+    /// (注:如果两条线程都锁定则会死锁(它们都在等待对方同步), 因此只能有一条线程锁定同步状态)
+    /// </summary>
+    internal bool AcquireSyncing()
     {
+        lock (loader)
+        {
+            if (this.syncing) return false;
+            this.syncing = true;
+            return true;
+        }
+    }
+    /// <summary> 释放同步锁定 </summary>
+    internal void ReleaseSyncing()
+    {
+        lock (loader)
+        {
+            this.syncing = false;
+        }
+    }
+
+
+    private class Event
+    {
+        public string name;
+        public Package data;
+    }
+    private class SyncLoader : ILoader
+    {
+        private JsWorker worker = null;
         //脚本缓存
         private Dictionary<string, string> scripts;
         private Dictionary<string, string> debugPaths;
@@ -284,8 +317,9 @@ public class JsWorker : MonoBehaviour, IDisposable
         private string readContent = null;
         private string debugpath = null;
 
-        public _SyncLoader(ILoader loader)
+        public SyncLoader(JsWorker worker, ILoader loader)
         {
+            this.worker = worker;
             this.loader = loader;
             this.scripts = new Dictionary<string, string>();
             this.debugPaths = new Dictionary<string, string>();
@@ -297,12 +331,15 @@ public class JsWorker : MonoBehaviour, IDisposable
             bool result = false;
             if (this.state.TryGetValue(filepath, out result))
                 return result;
+            //获取同步状态
+            if (!worker.AcquireSyncing())
+                throw new Exception("Other thread is syncing!");
             //写入主线程
             locker.AcquireWriterLock(lockTimeout);
             this.filePath = filepath;
             this.fileExists = false;
             locker.ReleaseWriterLock();
-            //检测主线程状态
+            //等待主线程同步
             try
             {
                 while (true)
@@ -318,6 +355,7 @@ public class JsWorker : MonoBehaviour, IDisposable
             finally
             {
                 locker.ReleaseReaderLock();
+                worker.ReleaseSyncing();
             }
         }
         public string ReadFile(string filepath, out string debugpath)
@@ -328,13 +366,16 @@ public class JsWorker : MonoBehaviour, IDisposable
                 debugpath = this.debugPaths[filepath];
                 return script;
             }
+            //获取同步状态
+            if (!worker.AcquireSyncing())
+                throw new Exception("Other thread is syncing!");
             //写入主线程
             locker.AcquireWriterLock(lockTimeout);
             this.readPath = filepath;
             this.readContent = null;
             this.debugpath = null;
             locker.ReleaseWriterLock();
-            //检测主线程状态
+            //等待主线程同步
             try
             {
                 while (true)
@@ -353,10 +394,10 @@ public class JsWorker : MonoBehaviour, IDisposable
             finally
             {
                 locker.ReleaseReaderLock();
+                worker.ReleaseSyncing();
             }
         }
 
-        //主线程驱动接口
         public void ProcessMain()
         {
             if (this.filePath != null || this.readPath != null)
@@ -391,166 +432,147 @@ public class JsWorker : MonoBehaviour, IDisposable
             }
         }
     }
-    private class _Event
-    {
-        public string name;
-        public Package data;
-    }
     public class SyncProcess
     {
         private JsWorker worker = null;
         //线程安全
         private ReaderWriterLock locker = new ReaderWriterLock();
         private const int lockTimeout = 1000;
-        //同步状态
-        private bool syncing;
         //同步消息
-        private string mainEventName = null;
-        private Package mainEventData = null;
-        private string childEventName = null;
-        private Package childEventData = null;
+        private string m_eventName = null;
+        private string c_eventName = null;
+        private Package m_eventData = null;
+        private Package c_eventData = null;
 
         public SyncProcess(JsWorker worker)
         {
             this.worker = worker;
-            this.syncing = false;
         }
 
-        public object CallMain(string name, Package data)
+        public object CallMain(string name, Package data, bool throwOnError = true)
         {
             if (name == null) return null;
             //获取同步状态
-            if (!LockSyncing())
-                throw new Exception("无法访问线程, 目标正在等待同步");
+            if (!worker.AcquireSyncing())
+            {
+                if (!throwOnError) return null;
+                throw new Exception("Other thread is syncing!");
+            }
             //写入主线程
             locker.AcquireWriterLock(lockTimeout);
-            this.mainEventName = name;
-            this.mainEventData = data;
+            this.m_eventName = name;
+            this.m_eventData = data;
             locker.ReleaseWriterLock();
-            //检测主线程状态
+            //等待主线程同步
             try
             {
                 while (true)
                 {
                     locker.AcquireReaderLock(lockTimeout);
-                    if (this.mainEventName == null)
+                    if (this.m_eventName == null)
                         break;
                     locker.ReleaseReaderLock();
                 }
-                return this.mainEventData;
+                return this.m_eventData;
             }
             finally
             {
                 locker.ReleaseReaderLock();
-                UnlockSyncing();
+                worker.ReleaseSyncing();
             }
         }
-        public object CallChild(string name, Package data)
+        public object CallChild(string name, Package data, bool throwOnError = true)
         {
             if (name == null) return null;
             //获取同步状态
-            if (!LockSyncing())
-                throw new Exception("无法访问线程, 目标正在等待同步");
+            if (!worker.AcquireSyncing())
+            {
+                if (!throwOnError) return null;
+                throw new Exception("Other thread is syncing!");
+            }
             //写入子线程
             locker.AcquireWriterLock(lockTimeout);
-            this.childEventName = name;
-            this.childEventData = data;
+            this.c_eventName = name;
+            this.c_eventData = data;
             locker.ReleaseWriterLock();
-            //检测子线程状态
+            //等待子线程同步
             try
             {
                 while (true)
                 {
                     locker.AcquireReaderLock(lockTimeout);
-                    if (this.childEventName == null)
+                    if (this.c_eventName == null)
                         break;
                     locker.ReleaseReaderLock();
                 }
-                return this.childEventData;
+                return this.c_eventData;
             }
             finally
             {
                 locker.ReleaseReaderLock();
-                UnlockSyncing();
+                worker.ReleaseSyncing();
             }
         }
         public void ProcessMain()
         {
-            if (this.mainEventName != null)
+            if (this.m_eventName != null)
             {
                 Func<string, Package, Package> func = this.worker.messageByMain;
                 try
                 {
                     locker.AcquireWriterLock(lockTimeout);
                     Package data = null;
-                    if (this.mainEventName != null && func != null)
-                        data = func(this.mainEventName, this.mainEventData);
-                    this.mainEventData = data;
+                    if (this.m_eventName != null && func != null)
+                        data = func(this.m_eventName, this.m_eventData);
+                    this.m_eventData = data;
                 }
                 catch (Exception e)
                 {
-                    this.mainEventData = null;
+                    this.m_eventData = null;
                     throw e;
                 }
                 finally
                 {
-                    this.mainEventName = null;
+                    this.m_eventName = null;
                     locker.ReleaseWriterLock();
                 }
             }
         }
         public void ProcessChild()
         {
-            if (this.childEventName != null)
+            if (this.c_eventName != null)
             {
                 Func<string, Package, Package> func = this.worker.messageByChild;
                 try
                 {
                     locker.AcquireWriterLock(lockTimeout);
                     Package data = null;
-                    if (this.childEventName != null && func != null)
-                        data = func(this.childEventName, this.childEventData);
-                    this.childEventData = data;
+                    if (this.c_eventName != null && func != null)
+                        data = func(this.c_eventName, this.c_eventData);
+                    this.c_eventData = data;
                 }
                 catch (Exception e)
                 {
-                    this.childEventData = null;
+                    this.c_eventData = null;
                     throw e;
                 }
                 finally
                 {
-                    this.childEventName = null;
+                    this.c_eventName = null;
                     locker.ReleaseWriterLock();
                 }
-            }
-        }
-
-        private bool LockSyncing()
-        {
-            lock (locker)
-            {
-                if (this.syncing) return false;
-                this.syncing = true;
-                return true;
-            }
-        }
-        private void UnlockSyncing()
-        {
-            lock (locker)
-            {
-                this.syncing = false;
             }
         }
     }
     public class Package
     {
-        /**此数据类型 */
+        /**data type */
         public Type type;
-        /**数据内容 */
+        /**data value */
         public object value;
-        /**数据信息 */
+        /**info */
         public object info;
-        /**如果是对象, 代表对象Id */
+        /**object id */
         public int id = -1;
 
         public static byte[] ToBytes(Puerts.ArrayBuffer value)
@@ -578,7 +600,7 @@ public class JsWorker : MonoBehaviour, IDisposable
         Object,
         Array,
         Function,
-        /**ArrayBuffer类型为指针传递,如果直接传将会造成多线程共享内存crash */
+        /**ArrayBuffer类型为指针传递, 直接传递将多线程共享内存而crash */
         ArrayBuffer,
         RefObject
     }
