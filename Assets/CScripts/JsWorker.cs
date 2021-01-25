@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 using Puerts;
 using UnityEngine;
 
@@ -28,9 +27,13 @@ public class JsWorker : MonoBehaviour, IDisposable
     /// </summary>
     private const string JS_WORKER = "require('./common/jsWorker')";
     /// <summary>
-    /// 一次处理的事件数量
+    /// 每次处理的事件
     /// </summary>
     private const int PROCESS_COUNT = 5;
+    /// <summary>
+    /// Unity主线程
+    /// </summary>
+    private static readonly int MAIN_THREAD_ID = Thread.CurrentThread.ManagedThreadId;
 
     public JsEnv JsEnv { get; private set; }
     //消息接口
@@ -56,6 +59,8 @@ public class JsWorker : MonoBehaviour, IDisposable
             return this.sync;
         }
     }
+    public ReaderWriterLock locker;
+    private const int lockTimeout = 1000;
     //同步状态
     private bool syncing;
     //线程
@@ -67,12 +72,13 @@ public class JsWorker : MonoBehaviour, IDisposable
     //Eval require list
     private Queue<(string, string)> eval;
 
-    public JsWorker()
+    private JsWorker()
     {
         mainEvents = new Queue<Event>();
         childEvents = new Queue<Event>();
         eval = new Queue<(string, string)>();
         sync = new SyncProcess(this);
+        locker = new ReaderWriterLock();
     }
     void Start()
     {
@@ -142,6 +148,12 @@ public class JsWorker : MonoBehaviour, IDisposable
         }));
         thread.IsBackground = true;
         thread.Start();
+    }
+    public void VerifySafety(bool isMainThread)
+    {
+        var id = Thread.CurrentThread.ManagedThreadId;
+        if (isMainThread && id != MAIN_THREAD_ID || !isMainThread && id == MAIN_THREAD_ID)
+            throw new Exception("Incorrect in thread");
     }
     public void Startup(string filepath)
     {
@@ -270,26 +282,47 @@ public class JsWorker : MonoBehaviour, IDisposable
             }
         }
     }
+    private void ProcessAsyncing()
+    {
+        if (Thread.CurrentThread.ManagedThreadId == MAIN_THREAD_ID)
+        {
+            sync.ProcessMain();
+            loader.ProcessMain();
+        }
+        else
+            sync.ProcessChild();
+    }
     /// <summary>
     /// 获取同步锁定, 返回是否成功
     /// (注:如果两条线程都锁定则会死锁(它们都在等待对方同步), 因此只能有一条线程锁定同步状态)
     /// </summary>
     internal bool AcquireSyncing()
     {
-        lock (loader)
+        var timeout = DateTime.Now + TimeSpan.FromMilliseconds(lockTimeout);
+        //如果未处于同步中直接返回, 否则同步后等待状态更新
+        while (DateTime.Now <= timeout)
         {
-            if (this.syncing) return false;
-            this.syncing = true;
-            return true;
+            //请求锁
+            locker.AcquireWriterLock(lockTimeout);
+            if (!this.syncing)
+            {
+                this.syncing = true;
+                locker.ReleaseWriterLock();
+                return true;
+            }
+            ProcessAsyncing();
+            //释放锁
+            locker.ReleaseWriterLock();
+            Thread.Sleep(20);
         }
+        return false;
     }
     /// <summary> 释放同步锁定 </summary>
     internal void ReleaseSyncing()
     {
-        lock (loader)
-        {
-            this.syncing = false;
-        }
+        locker.AcquireWriterLock(lockTimeout);
+        this.syncing = false;
+        locker.ReleaseWriterLock();
     }
 
 
@@ -440,8 +473,8 @@ public class JsWorker : MonoBehaviour, IDisposable
         private const int lockTimeout = 1000;
         //同步消息
         private string m_eventName = null;
-        private string c_eventName = null;
         private Package m_eventData = null;
+        private string c_eventName = null;
         private Package c_eventData = null;
 
         public SyncProcess(JsWorker worker)
