@@ -1,4 +1,4 @@
-**本项目已过时, 请移步[https://github.com/throw-out/puerts-unity-kit](https://github.com/throw-out/puerts-unity-kit)**
+**本项目已过时, 已集成至[https://github.com/throw-out/puerts-unity-kit](https://github.com/throw-out/puerts-unity-kit)项目(`ThreadWorker`模块)**
 
 # Unity下js多线程支持
 
